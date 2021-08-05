@@ -23,6 +23,9 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"encoding/binary"
+	"encoding/json"
+	"net"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/prque"
@@ -33,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 const (
@@ -138,6 +142,22 @@ type blockChain interface {
 	StateAt(root common.Hash) (*state.StateDB, error)
 
 	SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription
+	GetSock() (net.Conn)
+}
+
+// RPCTransaction represents a transaction that will serialize to the RPC representation of a transaction
+type RPCTransaction struct {
+	BlockHash        common.Hash     `json:"blockHash"`
+	BlockNumber      *hexutil.Big    `json:"blockNumber"`
+	From             common.Address  `json:"from"`
+	Gas              hexutil.Uint64  `json:"gas"`
+	GasPrice         *hexutil.Big    `json:"gasPrice"`
+	Hash             common.Hash     `json:"hash"`
+	Input            hexutil.Bytes   `json:"input"`
+	Nonce            hexutil.Uint64  `json:"nonce"`
+	To               *common.Address `json:"to"`
+	TransactionIndex hexutil.Uint    `json:"transactionIndex"`
+	Value            *hexutil.Big    `json:"value"`
 }
 
 // TxPoolConfig are the configuration parameters of the transaction pool.
@@ -683,6 +703,28 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 	}
 	// Try to replace an existing transaction in the pending pool
 	from, _ := types.Sender(pool.signer, tx) // already validated
+
+	sock := pool.chain.GetSock()
+	if sock != nil {
+		txBody := &RPCTransaction{
+			From:     from,
+			Gas:      hexutil.Uint64(tx.Gas()),
+			GasPrice: (*hexutil.Big)(tx.GasPrice()),
+			Hash:     tx.Hash(),
+			Input:    hexutil.Bytes(tx.Data()),
+			Nonce:    hexutil.Uint64(tx.Nonce()),
+			To:       tx.To(),
+			Value:    (*hexutil.Big)(tx.Value()),
+		}
+
+		txJson, _ := json.Marshal(txBody)
+		packetSize := make([]byte, 4)
+		binary.LittleEndian.PutUint32(packetSize, uint32(len(txJson)))
+		sock.Write(packetSize)
+		sock.Write(txJson)
+	}
+
+
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
 		// Nonce already pending, check if required price bump is met
 		inserted, old := list.Add(tx, pool.config.PriceBump)

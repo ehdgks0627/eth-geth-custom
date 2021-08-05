@@ -24,11 +24,16 @@ import (
 	"math/big"
 	mrand "math/rand"
 	"sort"
+	"encoding/binary"
+	"encoding/json"
 	"sync"
 	"sync/atomic"
+	"net"
+	"os"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/common/prque"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -209,6 +214,8 @@ type BlockChain struct {
 
 	shouldPreserve  func(*types.Block) bool        // Function used to determine whether should preserve the given block.
 	terminateInsert func(common.Hash, uint64) bool // Testing hook used to terminate ancient receipt chain insertion.
+
+	sock 		net.Conn
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -224,6 +231,15 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	blockCache, _ := lru.New(blockCacheLimit)
 	txLookupCache, _ := lru.New(txLookupCacheLimit)
 	futureBlocks, _ := lru.New(maxFutureBlocks)
+
+	var err error
+	err = os.Remove("geth-notify.sock")
+	ln, lnErr := net.Listen("unix", "geth-notify.sock")
+	if lnErr != nil {
+		log.Error("An error occured while open ipc server", lnErr)
+ 	} else {
+		log.Info("Custom ipc opened, listened at geth-notify.sock")
+	}
 
 	bc := &BlockChain{
 		chainConfig: chainConfig,
@@ -246,11 +262,23 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		engine:         engine,
 		vmConfig:       vmConfig,
 	}
+
+	go func(ln net.Listener) {
+		for {
+			fd, err := ln.Accept()
+			if err != nil {
+				log.Error("Custom socket accept error : ", err)
+				return
+			}
+			log.Info("Custom socket client connected")
+			bc.sock = fd
+		}
+	}(ln)
+
 	bc.validator = NewBlockValidator(chainConfig, bc, engine)
 	bc.prefetcher = newStatePrefetcher(chainConfig, bc, engine)
 	bc.processor = NewStateProcessor(chainConfig, bc, engine)
 
-	var err error
 	bc.hc, err = NewHeaderChain(db, chainConfig, engine, bc.insertStopped)
 	if err != nil {
 		return nil, err
@@ -395,6 +423,10 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		}()
 	}
 	return bc, nil
+}
+
+func (bc *BlockChain) GetSock() net.Conn {
+	return bc.sock
 }
 
 // GetVMConfig returns the block chain VM config.
@@ -1909,6 +1941,16 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, er
 		blockWriteTimer.Update(time.Since(substart) - statedb.AccountCommits - statedb.StorageCommits - statedb.SnapshotCommits)
 		blockInsertTimer.UpdateSince(start)
 
+		sock := bc.GetSock()
+		if sock != nil {
+			blockBody, _ := CustomFullMarshalBlock(bc, block)
+			blockJson, _ := json.Marshal(blockBody)
+			packetSize := make([]byte, 4)
+			binary.LittleEndian.PutUint32(packetSize, uint32(len(blockJson)))
+			sock.Write(packetSize)
+			sock.Write(blockJson)
+		}
+
 		switch status {
 		case CanonStatTy:
 			log.Debug("Inserted new block", "number", block.Number(), "hash", block.Hash(),
@@ -2520,3 +2562,93 @@ func (bc *BlockChain) SubscribeLogsEvent(ch chan<- []*types.Log) event.Subscript
 func (bc *BlockChain) SubscribeBlockProcessingEvent(ch chan<- bool) event.Subscription {
 	return bc.scope.Track(bc.blockProcFeed.Subscribe(ch))
 }
+
+type CustomBlockTransaction struct {
+	BlockHash        common.Hash     `json:"blockHash"`
+	BlockNumber      *hexutil.Big    `json:"blockNumber"`
+	From             common.Address  `json:"from"`
+	Gas              hexutil.Uint64  `json:"gas"`
+	GasPrice         *hexutil.Big    `json:"gasPrice"`
+	Hash             common.Hash     `json:"hash"`
+	Input            hexutil.Bytes   `json:"input"`
+	Nonce            hexutil.Uint64  `json:"nonce"`
+	To               *common.Address `json:"to"`
+	TransactionIndex hexutil.Uint    `json:"transactionIndex"`
+	Value            *hexutil.Big    `json:"value"`
+	Receipt			 *types.Receipt  `json:"receipt"`
+}
+
+// RPCMarshalBlock converts the given block to the RPC output which depends on fullTx. If inclTx is true transactions are
+// returned. When fullTx is true the returned block contains full transaction details, otherwise it will only contain
+// transaction hashes.
+func CustomFullMarshalBlock(bc *BlockChain, b *types.Block) (map[string]interface{}, error) {
+	head := b.Header() // copies the header once
+	fields := map[string]interface{}{
+		"number":           (*hexutil.Big)(head.Number),
+		"hash":             b.Hash(),
+		"parentHash":       head.ParentHash,
+		"nonce":            head.Nonce,
+		"mixHash":          head.MixDigest,
+		"sha3Uncles":       head.UncleHash,
+		"logsBloom":        head.Bloom,
+		"stateRoot":        head.Root,
+		"miner":            head.Coinbase,
+		"difficulty":       (*hexutil.Big)(head.Difficulty),
+		"extraData":        hexutil.Bytes(head.Extra),
+		"size":             hexutil.Uint64(b.Size()),
+		"gasLimit":         hexutil.Uint64(head.GasLimit),
+		"gasUsed":          hexutil.Uint64(head.GasUsed),
+		"timestamp":        hexutil.Uint64(head.Time),
+		"transactionsRoot": head.TxHash,
+		"receiptsRoot":     head.ReceiptHash,
+	}
+
+	formatTx := func(b *types.Block, tx *types.Transaction, index int, receipt *types.Receipt) (interface{}, error) {
+		blockHash := b.Hash()
+		blockNumber := b.NumberU64()
+		var signer types.Signer = types.FrontierSigner{}
+		if tx.Protected() {
+			signer = types.NewEIP155Signer(tx.ChainId())
+		}
+		from, _ := types.Sender(signer, tx)
+
+		result := &CustomBlockTransaction{
+			From:     from,
+			Gas:      hexutil.Uint64(tx.Gas()),
+			GasPrice: (*hexutil.Big)(tx.GasPrice()),
+			Hash:     tx.Hash(),
+			Input:    hexutil.Bytes(tx.Data()),
+			Nonce:    hexutil.Uint64(tx.Nonce()),
+			To:       tx.To(),
+			Value:    (*hexutil.Big)(tx.Value()),
+			Receipt:  receipt,
+		}
+		if blockHash != (common.Hash{}) {
+			result.BlockHash = blockHash
+			result.BlockNumber = (*hexutil.Big)(new(big.Int).SetUint64(blockNumber))
+			result.TransactionIndex = hexutil.Uint(index)
+		}
+		return result, nil
+	}
+
+	txs := b.Transactions()
+	receipts := bc.GetReceiptsByHash(b.Hash())
+
+	transactions := make([]interface{}, len(txs))
+	var err error
+	for i, tx := range txs {
+		if transactions[i], err = formatTx(b, tx, i, receipts[i]); err != nil {
+			return nil, err
+		}
+	}
+	fields["transactions"] = transactions
+
+	uncles := b.Uncles()
+	uncleHashes := make([]common.Hash, len(uncles))
+	for i, uncle := range uncles {
+		uncleHashes[i] = uncle.Hash()
+	}
+	fields["uncles"] = uncleHashes
+
+	return fields, nil
+} 
