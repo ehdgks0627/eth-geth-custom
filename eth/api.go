@@ -34,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
@@ -328,30 +327,30 @@ type BadBlockArgs struct {
 // and returns them as a JSON list of block-hashes
 func (api *PrivateDebugAPI) GetBadBlocks(ctx context.Context) ([]*BadBlockArgs, error) {
 	var (
-		err     error
-		blocks  = rawdb.ReadAllBadBlocks(api.eth.chainDb)
-		results = make([]*BadBlockArgs, 0, len(blocks))
+	// err     error
+	// blocks  = rawdb.ReadAllBadBlocks(api.eth.chainDb)
+	// results = make([]*BadBlockArgs, 0, len(blocks))
 	)
-	for _, block := range blocks {
-		var (
-			blockRlp  string
-			blockJSON map[string]interface{}
-		)
-		if rlpBytes, err := rlp.EncodeToBytes(block); err != nil {
-			blockRlp = err.Error() // Hacky, but hey, it works
-		} else {
-			blockRlp = fmt.Sprintf("0x%x", rlpBytes)
-		}
-		if blockJSON, err = ethapi.RPCMarshalBlock(block, true, true); err != nil {
-			blockJSON = map[string]interface{}{"error": err.Error()}
-		}
-		results = append(results, &BadBlockArgs{
-			Hash:  block.Hash(),
-			RLP:   blockRlp,
-			Block: blockJSON,
-		})
-	}
-	return results, nil
+	// for _, block := range blocks {
+	// 	var (
+	// 		blockRlp  string
+	// 		blockJSON map[string]interface{}
+	// 	)
+	// 	if rlpBytes, err := rlp.EncodeToBytes(block); err != nil {
+	// 		blockRlp = err.Error() // Hacky, but hey, it works
+	// 	} else {
+	// 		blockRlp = fmt.Sprintf("0x%x", rlpBytes)
+	// 	}
+	// 	if blockJSON, err = ethapi.RPCMarshalBlock(ctx, api.eth.blockchain, true, true); err != nil {
+	// 		blockJSON = map[string]interface{}{"error": err.Error()}
+	// 	}
+	// 	results = append(results, &BadBlockArgs{
+	// 		Hash:  block.Hash(),
+	// 		RLP:   blockRlp,
+	// 		Block: blockJSON,
+	// 	})
+	// }
+	return make([]*BadBlockArgs, 0, 0), nil
 }
 
 // AccountRangeMaxResults is the maximum number of results to be returned per call

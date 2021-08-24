@@ -23,13 +23,11 @@ import (
 	"io"
 	"math/big"
 	mrand "math/rand"
-	"sort"
-	"encoding/binary"
-	"encoding/json"
-	"sync"
-	"sync/atomic"
 	"net"
 	"os"
+	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -215,7 +213,7 @@ type BlockChain struct {
 	shouldPreserve  func(*types.Block) bool        // Function used to determine whether should preserve the given block.
 	terminateInsert func(common.Hash, uint64) bool // Testing hook used to terminate ancient receipt chain insertion.
 
-	sock 		net.Conn
+	sock net.Conn
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -237,7 +235,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	ln, lnErr := net.Listen("unix", "geth-notify.sock")
 	if lnErr != nil {
 		log.Error("An error occured while open ipc server", lnErr)
- 	} else {
+	} else {
 		log.Info("Custom ipc opened, listened at geth-notify.sock")
 	}
 
@@ -1941,16 +1939,6 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, er
 		blockWriteTimer.Update(time.Since(substart) - statedb.AccountCommits - statedb.StorageCommits - statedb.SnapshotCommits)
 		blockInsertTimer.UpdateSince(start)
 
-		sock := bc.GetSock()
-		if sock != nil {
-			blockBody, _ := CustomFullMarshalBlock(bc, block)
-			blockJson, _ := json.Marshal(blockBody)
-			packetSize := make([]byte, 4)
-			binary.LittleEndian.PutUint32(packetSize, uint32(len(blockJson)))
-			sock.Write(packetSize)
-			sock.Write(blockJson)
-		}
-
 		switch status {
 		case CanonStatTy:
 			log.Debug("Inserted new block", "number", block.Number(), "hash", block.Hash(),
@@ -2575,7 +2563,7 @@ type CustomBlockTransaction struct {
 	To               *common.Address `json:"to"`
 	TransactionIndex hexutil.Uint    `json:"transactionIndex"`
 	Value            *hexutil.Big    `json:"value"`
-	Receipt			 *types.Receipt  `json:"receipt"`
+	Receipt          *types.Receipt  `json:"receipt"`
 }
 
 // RPCMarshalBlock converts the given block to the RPC output which depends on fullTx. If inclTx is true transactions are
@@ -2651,4 +2639,4 @@ func CustomFullMarshalBlock(bc *BlockChain, b *types.Block) (map[string]interfac
 	fields["uncles"] = uncleHashes
 
 	return fields, nil
-} 
+}

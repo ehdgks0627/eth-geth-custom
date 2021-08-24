@@ -1195,24 +1195,28 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 // RPCMarshalBlock converts the given block to the RPC output which depends on fullTx. If inclTx is true transactions are
 // returned. When fullTx is true the returned block contains full transaction details, otherwise it will only contain
 // transaction hashes.
-func RPCMarshalBlock(block *types.Block, inclTx bool, fullTx bool) (map[string]interface{}, error) {
+func RPCMarshalBlock(ctx context.Context, s *PublicBlockChainAPI, block *types.Block, inclTx bool, fullTx bool) (map[string]interface{}, error) {
 	fields := RPCMarshalHeader(block.Header())
 	fields["size"] = hexutil.Uint64(block.Size())
 
 	if inclTx {
-		formatTx := func(tx *types.Transaction) (interface{}, error) {
+		formatTx := func(tx *types.Transaction, receipt *types.Receipt) (interface{}, error) {
 			return tx.Hash(), nil
 		}
 		if fullTx {
-			formatTx = func(tx *types.Transaction) (interface{}, error) {
-				return newRPCTransactionFromBlockHash(block, tx.Hash()), nil
+			formatTx = func(tx *types.Transaction, receipt *types.Receipt) (interface{}, error) {
+				return &RPCTransactionWithReceipt{
+					Transaction: newRPCTransactionFromBlockHash(block, tx.Hash()),
+					Receipt:     receipt,
+				}, nil
 			}
 		}
 		txs := block.Transactions()
-		transactions := make([]interface{}, len(txs))
 		var err error
-		for i, tx := range txs {
-			if transactions[i], err = formatTx(tx); err != nil {
+		receipts, err := s.b.GetReceipts(ctx, block.Hash())
+		transactions := make([]interface{}, len(txs))
+		for i, _ := range txs {
+			if transactions[i], err = formatTx(txs[i], receipts[i]); err != nil {
 				return nil, err
 			}
 		}
@@ -1239,7 +1243,7 @@ func (s *PublicBlockChainAPI) rpcMarshalHeader(ctx context.Context, header *type
 // rpcMarshalBlock uses the generalized output filler, then adds the total difficulty field, which requires
 // a `PublicBlockchainAPI`.
 func (s *PublicBlockChainAPI) rpcMarshalBlock(ctx context.Context, b *types.Block, inclTx bool, fullTx bool) (map[string]interface{}, error) {
-	fields, err := RPCMarshalBlock(b, inclTx, fullTx)
+	fields, err := RPCMarshalBlock(ctx, s, b, inclTx, fullTx)
 	if err != nil {
 		return nil, err
 	}
@@ -1270,6 +1274,11 @@ type RPCTransaction struct {
 	V                *hexutil.Big      `json:"v"`
 	R                *hexutil.Big      `json:"r"`
 	S                *hexutil.Big      `json:"s"`
+}
+
+type RPCTransactionWithReceipt struct {
+	Transaction *RPCTransaction `json:"transaction"`
+	Receipt     *types.Receipt  `json:"receipt"`
 }
 
 // newRPCTransaction returns a transaction that will serialize to the RPC
