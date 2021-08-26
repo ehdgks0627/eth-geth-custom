@@ -756,6 +756,29 @@ func (s *PublicBlockChainAPI) GetBlockByHash(ctx context.Context, hash common.Ha
 	return nil, err
 }
 
+func (s *PublicBlockChainAPI) DumpBlockByNumber(ctx context.Context, number rpc.BlockNumber) (map[string]interface{}, error) {
+	block, err := s.b.BlockByNumber(ctx, number)
+	if block != nil && err == nil {
+		response, err := s.rpcMarshalDumpBlock(ctx, block)
+		if err == nil && number == rpc.PendingBlockNumber {
+			// Pending blocks need to nil out a few fields
+			for _, field := range []string{"hash", "nonce", "miner"} {
+				response[field] = nil
+			}
+		}
+		return response, err
+	}
+	return nil, err
+}
+
+func (s *PublicBlockChainAPI) DumpBlockByHash(ctx context.Context, hash common.Hash) (map[string]interface{}, error) {
+	block, err := s.b.BlockByHash(ctx, hash)
+	if block != nil {
+		return s.rpcMarshalDumpBlock(ctx, block)
+	}
+	return nil, err
+}
+
 // GetUncleByBlockNumberAndIndex returns the uncle block for the given block hash and index. When fullTx is true
 // all transactions in the block are returned in full detail, otherwise only the transaction hash is returned.
 func (s *PublicBlockChainAPI) GetUncleByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index hexutil.Uint) (map[string]interface{}, error) {
@@ -1195,33 +1218,54 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 // RPCMarshalBlock converts the given block to the RPC output which depends on fullTx. If inclTx is true transactions are
 // returned. When fullTx is true the returned block contains full transaction details, otherwise it will only contain
 // transaction hashes.
-func RPCMarshalBlock(ctx context.Context, s *PublicBlockChainAPI, block *types.Block, inclTx bool, fullTx bool) (map[string]interface{}, error) {
+func RPCMarshalBlock(block *types.Block, inclTx bool, fullTx bool) (map[string]interface{}, error) {
 	fields := RPCMarshalHeader(block.Header())
 	fields["size"] = hexutil.Uint64(block.Size())
 
 	if inclTx {
-		formatTx := func(tx *types.Transaction, receipt *types.Receipt) (interface{}, error) {
+		formatTx := func(tx *types.Transaction) (interface{}, error) {
 			return tx.Hash(), nil
 		}
 		if fullTx {
-			formatTx = func(tx *types.Transaction, receipt *types.Receipt) (interface{}, error) {
-				return &RPCTransactionWithReceipt{
-					Transaction: newRPCTransactionFromBlockHash(block, tx.Hash()),
-					Receipt:     receipt,
-				}, nil
+			formatTx = func(tx *types.Transaction) (interface{}, error) {
+				return newRPCTransactionFromBlockHash(block, tx.Hash()), nil
 			}
 		}
 		txs := block.Transactions()
 		var err error
-		receipts, err := s.b.GetReceipts(ctx, block.Hash())
 		transactions := make([]interface{}, len(txs))
 		for i, _ := range txs {
-			if transactions[i], err = formatTx(txs[i], receipts[i]); err != nil {
+			if transactions[i], err = formatTx(txs[i]); err != nil {
 				return nil, err
 			}
 		}
 		fields["transactions"] = transactions
 	}
+	uncles := block.Uncles()
+	uncleHashes := make([]common.Hash, len(uncles))
+	for i, uncle := range uncles {
+		uncleHashes[i] = uncle.Hash()
+	}
+	fields["uncles"] = uncleHashes
+
+	return fields, nil
+}
+
+func RPCMarshalDumpBlock(block *types.Block, txs []*types.Transaction, receipts []*types.Receipt) (map[string]interface{}, error) {
+	fields := RPCMarshalHeader(block.Header())
+	fields["size"] = hexutil.Uint64(block.Size())
+
+	transactions := make([]interface{}, len(txs))
+	for idx := 0; idx < len(txs); idx++ {
+		tx := txs[idx]
+		receipt := receipts[idx]
+
+		transactions[idx] = &RPCTransactionWithReceipt{
+			Transaction: newRPCTransaction(tx, block.Hash(), block.NumberU64(), uint64(idx), block.BaseFee()),
+			Receipt:     receipt,
+		}
+	}
+	fields["transactions"] = transactions
 	uncles := block.Uncles()
 	uncleHashes := make([]common.Hash, len(uncles))
 	for i, uncle := range uncles {
@@ -1243,13 +1287,26 @@ func (s *PublicBlockChainAPI) rpcMarshalHeader(ctx context.Context, header *type
 // rpcMarshalBlock uses the generalized output filler, then adds the total difficulty field, which requires
 // a `PublicBlockchainAPI`.
 func (s *PublicBlockChainAPI) rpcMarshalBlock(ctx context.Context, b *types.Block, inclTx bool, fullTx bool) (map[string]interface{}, error) {
-	fields, err := RPCMarshalBlock(ctx, s, b, inclTx, fullTx)
+	fields, err := RPCMarshalBlock(b, inclTx, fullTx)
 	if err != nil {
 		return nil, err
 	}
 	if inclTx {
 		fields["totalDifficulty"] = (*hexutil.Big)(s.b.GetTd(ctx, b.Hash()))
 	}
+	return fields, err
+}
+
+// rpcMarshalBlock uses the generalized output filler, then adds the total difficulty field, which requires
+// a `PublicBlockchainAPI`.
+func (s *PublicBlockChainAPI) rpcMarshalDumpBlock(ctx context.Context, b *types.Block) (map[string]interface{}, error) {
+	txs := b.Transactions()
+	receipts, err := s.b.GetReceipts(ctx, b.Hash())
+	fields, err := RPCMarshalDumpBlock(b, txs, receipts)
+	if err != nil {
+		return nil, err
+	}
+	fields["totalDifficulty"] = (*hexutil.Big)(s.b.GetTd(ctx, b.Hash()))
 	return fields, err
 }
 
